@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 环境变量（含 DeepSeek API Key，切勿提交）
+.env
+.env.local
+.env.*.local
+
+# 本地数据：BM25 语料快照、入库清单
+data/store/*
+!data/store/.gitkeep
+
+# 上传的政策文档（若含内部资料不要提交）
+# 如需保留示例文档，注释掉下面一行
+# data/policies/*
+!data/policies/*.md
+
+# 日志
+*.log
+logs/
