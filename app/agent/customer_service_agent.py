@@ -126,7 +126,7 @@ class CustomerServiceAgent:
     # ------------------------------------------------------------------
     # 构建
     # ------------------------------------------------------------------
-    def build(self) -> Any:
+    def build(self, streaming : bool = True) -> Any:
         """构建（或复用）Agent。"""
         if self._agent is not None:
             return self._agent
@@ -137,7 +137,7 @@ class CustomerServiceAgent:
         from app.agent.llm import build_chat_model
 
         tools = [*get_policy_tools(), *get_complaint_tools()]
-        model = build_chat_model(self.settings)
+        model = build_chat_model(self.settings, streaming=streaming)
 
         # InMemorySaver 提供多轮对话记忆（按 thread_id 隔离）。
         # 单进程部署足够；多副本部署时应换成 Redis/Postgres checkpointer。
@@ -252,7 +252,7 @@ class CustomerServiceAgent:
         * ``done``      —— 结束，携带完整回答
         """
         get_jwt_from_config(config)
-        agent = self.build()
+        agent = self.build(True)
         call_config = self._build_call_config(
             {**config, "configurable": {**config.get("configurable", {}), "thread_id": session_id}}
         )
@@ -266,6 +266,7 @@ class CustomerServiceAgent:
             version="v2",
         ):
             kind = event.get("event")
+            # logger.info(kind)
 
             if kind == "on_tool_start":
                 name = event.get("name", "")

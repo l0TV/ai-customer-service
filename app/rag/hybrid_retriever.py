@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -160,6 +161,8 @@ class HybridPolicyRetriever:
         self._bm25: BaseRetriever | None = None
         self._ensemble: BaseRetriever | None = None
         self._corpus_size = 0
+        # 保护 ensure_ready() 的懒加载，避免冷启动并发首请求重复构建索引
+        self._reload_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -196,7 +199,25 @@ class HybridPolicyRetriever:
         return True
 
     def ensure_ready(self) -> None:
-        if self._ensemble is None:
+        """确保检索器已加载（懒加载 + 线程安全）。
+
+        ``reload()`` 是重操作（读语料、连 Milvus、首次还会加载向量模型）。
+        去掉启动时的强制加载后，冷启动瞬间的并发首请求可能同时进入这里，
+        若不串行化就会重复构建多份索引并浪费十几秒。
+
+        实现要点：
+        * 快路径无锁（读完 ``_ensemble`` 非空即走），不影响正常请求性能；
+        * 慢路径加锁并二次检查，保证同一时刻只有一次构建；
+        * ``reload()`` 内部**最后**才给 ``_ensemble`` 赋值，因此读到非 None
+          即隐含 ``_bm25``、``_corpus_size`` 均已写入，不会看到半成品状态。
+        """
+        if self._ensemble is not None:
+            return
+
+        with self._reload_lock:
+            # 二次检查：可能已被其它线程或在锁外完成的 reload 填好
+            if self._ensemble is not None:
+                return
             self.reload()
 
     @property
@@ -372,10 +393,20 @@ def format_documents(documents: Iterable[Document], *, max_chars: int = 1400) ->
 
 @lru_cache(maxsize=1)
 def get_hybrid_retriever_cached() -> HybridPolicyRetriever:
-    """全局唯一混合检索器（首次访问时构建）。"""
-    retriever = HybridPolicyRetriever()
-    retriever.reload()
-    return retriever
+    """获取全局唯一混合检索器实例（**不加载体，lazy**）。
+
+    这里刻意**不**调用 ``reload()``。原因：``reload()`` 会载入 BM25 语料、
+    连接 Milvus 并在首次查询时加载向量模型，是秒级甚至十几秒的重操作。
+    若在此处执行，调用方（如 FastAPI lifespan）会在事件循环里同步阻塞。
+
+    加载统一交给 ``reload()`` / ``ensure_ready()``：
+    * 服务启动：``app.main`` 的 lifespan 用 ``asyncio.to_thread`` 调 ``reload()``；
+    * 其它场景（脚本、测试）：首次 ``retrieve()`` 时由 ``ensure_ready()`` 懒加载。
+
+    Returns:
+        尚未加载语料的检索器实例；使用前 ``ensure_ready()`` 会保证就绪。
+    """
+    return HybridPolicyRetriever()
 
 
 def get_hybrid_retriever() -> HybridPolicyRetriever:

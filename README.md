@@ -20,32 +20,32 @@ Spring Cloud Alibaba 商城（Nacos 注册、Spring Cloud Gateway 网关、JWT �
 ## 二、架构与调用链
 
 ```
-┌──────────┐   Authorization: Bearer <JWT>
-│  前端/APP │───────────────────────────────┐
-└──────────┘                               │
+┌───────────┐   Authorization: Bearer <JWT>
+│  前端/APP │──────────────────────────────┐
+└───────────┘                              │
                                            ▼
-                            ┌──────────────────────────────┐
-                            │  Spring Cloud Gateway  :88   │
-                            │  /api/ai/**     → AI 服务     │
+                            ┌────────────────────────────────┐
+                            │  Spring Cloud Gateway  :88     │
+                            │  /api/ai/**     → AI 服务      │
                             │  /api/member/** → tenhub-member│
-                            └──────────────┬───────────────┘
+                            └──────────────┬─────────────────┘
                                            │ lb://tenhub-ai-service
                                            ▼
-                                  ┌──────────────────┐        ┌──────────────┐
-                                  │  AI 客服服务      │◀──────▶│ Nacos :8848  │
-                                  │  FastAPI :8090   │ 注册/发现│ (public ns) │
-                                  │                  │        └──────────────┘
-                                  │  1. 提取 JWT      │  只提取，不解析
-                                  │  2. build_run_config
-                                  │  3. Agent 决策    │
-                                  └───┬──────────┬───┘
-                    政策类问题        │          │      投诉类诉求
+                                  ┌─────────────────────┐            ┌────────────────┐
+                                  │  AI 客服服务         │  ◀──────▶ │ Nacos :8848    │
+                                  │  FastAPI :8090      │   注册/发现 │ (public ns)    │
+                                  │                     │            └────────────────┘
+                                  │  1. 提取 JWT         │ 只提取，不解析
+                                  │  2. build_run_config │
+                                  │  3. Agent 决策       │
+                                  └───┬──────────┬──────┘
+                     政策类问题        │          │      投诉类诉求
                                       ▼          ▼
-                        ┌──────────────────┐  ┌────────────────────┐
-                        │ 混合检索          │  │ 工单创建 Tool       │
-                        │ BM25 + 向量 + RRF │  │ (携带 JWT)          │
-                        └────────┬─────────┘  └─────────┬──────────┘
-                                 ▼                      │
+                       ┌───────────────────┐   ┌────────────────────┐
+                       │ 混合检索           │   │ 工单创建 Tool       │
+                       │ BM25 + 向量 + RRF │   │ (携带 JWT)          │
+                       └────────┬──────────┘   └────────┬───────────┘
+                                ▼                       │
                         ┌──────────────────┐            │
                         │ Milvus :19530    │            │
                         │ (WSL Docker)     │            │
@@ -111,12 +111,15 @@ ai-customer-service/
 ├── scripts/
 │   ├── download_model.py           # 下载本地向量模型（支持国内镜像）
 │   ├── ingest_policies.py          # 命令行入库 + 一致性校验
+│   ├── calibrate_threshold.py      # 相关性阈值标定（增删文档后重跑）
+│   ├── verify_gateway_ai.py        # 经网关验证 Nacos 发现与路由
 │   └── make_test_jwt.py            # 联调用 JWT 生成（仅测试，不硬编码密钥）
 ├── tests/
 │   ├── test_units.py               # 24 个纯函数单测
-│   ├── test_integration.py         # 29 项集成检查
+│   ├── test_integration.py         # 30 项集成检查
 │   ├── test_tool_contract.py       # 15 项工单工具 HTTP 契约检查
 │   ├── test_agent_tool_passthrough.py  # Agent→Tool JWT 透传验证
+│   ├── test_startup_nonblocking.py # 启动预热不阻塞事件循环验证
 │   └── test_e2e_live.py            # 10 项真实 Java 后端端到端检查
 ├── requirements.txt
 └── .env.example
@@ -252,8 +255,22 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8090/api/ai/chat" `
 ### 6.2 严格拒答的三道防线
 
 1. **前置门控**：所有命中片段的 COSINE 相似度都低于 `AI_CS_RELEVANCE_THRESHOLD`
-   （默认 `0.40`）时，**直接返回固定拒答文案，不调用大模型**——省成本且从机制上杜绝幻觉。
-   > 阈值标定：实测相关政策问题最高相似度 0.55~0.75，无关问题约 0.33，取 0.40 留出间隔。
+   （默认 `0.45`）时，**直接返回固定拒答文案，不调用大模型**——省成本且从机制上杜绝幻觉。
+   > **阈值必须标定，不能凭感觉设**：运行 `python scripts/calibrate_threshold.py`，
+   > 它会用真实语料统计「相关问题」与「无关问题」的相似度分布，给出建议阈值。
+   >
+   > 2026-09 实测（125 片段 / 11 份政策文档，bge-small-zh-v1.5）：
+   >
+   > | | 最低 | 中位 | 最高 |
+   > | --- | --- | --- | --- |
+   > | 相关问题 | **0.5137** | 0.6705 | 0.7766 |
+   > | 无关问题 | 0.2398 | 0.3735 | **0.4067** |
+   >
+   > 空档 `[0.4067, 0.5137]` → 取 `0.45`，两端各留约 0.04 余量。
+   >
+   > ⚠️ **空档会随语料漂移**。项目早期用 `0.40` 尚可，但补入 8 份通用性较强的政策文档后，
+   > 无关问题最高分被抬到 `0.4089`，擦着阈值漏放（会作答无关问题）。
+   > **增删政策文档后请重新标定。**
 2. **Prompt 约束**：系统提示明确「仅依据资料作答」「资料不足必须拒答」
    「不得编造条款编号、时限、金额」。
 3. **后置校验**：识别模型输出的拒答短语，统一 `answerable` 标记与引用来源。
@@ -290,6 +307,12 @@ cd E:\javaProject\拾汇商城\ai-customer-service
 # 6) 经网关验证 Nacos 发现与路由（需 gateway + AI 服务都在运行）
 $jwt = .\.venv\Scripts\python.exe scripts\make_test_jwt.py --user-id 1 --from-nacos
 .\.venv\Scripts\python.exe scripts\verify_gateway_ai.py --jwt $jwt
+
+# 7) 启动预热不阻塞事件循环
+.\.venv\Scripts\python.exe tests\test_startup_nonblocking.py
+
+# 8) 相关性阈值标定（增删政策文档后重跑）
+.\.venv\Scripts\python.exe scripts\calibrate_threshold.py
 ```
 
 ### 实测结果（全部通过）
@@ -299,7 +322,8 @@ $jwt = .\.venv\Scripts\python.exe scripts\make_test_jwt.py --user-id 1 --from-na
 | `test_units.py` | 24 个单测 | **24/24 通过** |
 | `test_agent_tool_passthrough.py` | 4 项（含 schema 不外泄 runtime） | **全部通过** |
 | `test_tool_contract.py` | 15 项契约检查 | **15/15 通过** |
-| `test_integration.py` | 29 项集成检查 | **29/29 通过** |
+| `test_integration.py` | 30 项集成检查 | **30/30 通过** |
+| `test_startup_nonblocking.py` | 启动并发探测 | **通过**（预热 14s 期间最大请求耗时 0.010s） |
 | `test_e2e_live.py` | 10 项（真实 Java 后端） | **10/10 通过** |
 
 `test_e2e_live.py` 的实际验证内容：
@@ -366,7 +390,8 @@ Python 侧的 `_STATUS_TEXT` 映射也已同步为同一套中文文案。
 | `AI_CS_CHUNK_SIZE` / `_OVERLAP` | `500` / `80` | 分块参数 |
 | `AI_CS_DENSE_TOP_K` / `_SPARSE_TOP_K` | `8` / `8` | 两路召回条数 |
 | `AI_CS_RRF_C` | `60` | RRF 常数 |
-| `AI_CS_RELEVANCE_THRESHOLD` | `0.40` | 相关性门控阈值，调高更保守 |
+| `AI_CS_RELEVANCE_THRESHOLD` | `0.45` | 相关性门控阈值。**增删文档后请用 `scripts/calibrate_threshold.py` 重新标定** |
+| `AI_CS_HF_OFFLINE` | `true` | 向量模型离线加载。首次下载时设为 `false` |
 | `AI_CS_GATEWAY_BASE_URL` | `http://127.0.0.1:88` | 网关地址（**不直连 member**） |
 
 ---

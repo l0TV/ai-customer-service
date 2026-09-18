@@ -1,10 +1,10 @@
 """FastAPI 应用入口。
 
-启动：
-    uvicorn app.main:app --host 0.0.0.0 --port 8080
+启动（在项目根路径下）：
+    uvicorn app.main:app --host 0.0.0.0 --port 8090
 
 或直接运行：
-    python main.py
+    python -m app.main
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         built = await _warmup(retriever)
         if not built:
             logger.warning(
-                "混合检索未完全就绪（BM25 语料缺失？）。"
+                "混合检索未完全就绪或 BM25 语料缺失。"
                 "请调用 POST /api/ai/rag/ingest 完成知识库入库。"
             )
     except Exception as exc:  # noqa: BLE001 - 预热失败不应阻止服务启动

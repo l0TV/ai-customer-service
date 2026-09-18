@@ -38,7 +38,7 @@ import asyncio  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="政策文档入库到 Milvus + BM25")
-    parser.add_argument("--rebuild", action="store_true", help="清空并重建 Milvus 集合")
+    parser.add_argument("--rebuild", action="store_true", help="清空并重建 Milvus 集合", default=True)
     parser.add_argument("--dir", default=None, help="文档目录，默认 data/policies")
     parser.add_argument("--dry-run", action="store_true", help="只列出待处理文件")
     parser.add_argument("--log-level", default="INFO", help="日志级别")

@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from langchain_core.embeddings import Embeddings
@@ -24,6 +26,86 @@ logger = get_logger(__name__)
 
 # 需要加查询指令前缀的模型家族（中文/多语言 BGE）
 _INSTRUCTION_MODELS = ("bge-small-zh", "bge-base-zh", "bge-large-zh", "bge-m3")
+
+# 权重文件名，用于判断模型是否已完整缓存
+_WEIGHT_FILES = (
+    "model.safetensors",
+    "pytorch_model.bin",
+    "model.safetensors.index.json",
+    "pytorch_model.bin.index.json",
+)
+
+
+def _is_local_dir(model_name: str) -> bool:
+    try:
+        return Path(model_name).exists()
+    except OSError:
+        return False
+
+
+def _is_model_cached(model_name: str) -> bool:
+    """判断模型是否已存在于 HF 本地缓存（config + 任一权重文件命中）。
+
+    该判定不导入 transformers，可安全地在模块加载早期调用。
+    判定失败一律按「未缓存」处理，不影响正常下载。
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return False
+
+    try:
+        if not isinstance(try_to_load_from_cache(model_name, "config.json"), str):
+            return False
+        return any(
+            isinstance(try_to_load_from_cache(model_name, name), str)
+            for name in _WEIGHT_FILES
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _configure_offline_mode(model_name: str, force_offline: bool) -> bool:
+    """在任何 HF 相关库被导入之前开启离线模式。
+
+    **为什么必须在导入期设置**：``huggingface_hub`` 与 ``transformers`` 在
+    import 时就把 ``HF_HUB_OFFLINE`` / ``TRANSFORMERS_OFFLINE`` 读取为模块级
+    常量，之后再 ``os.environ[...] = ...`` **不会生效**。而判断「模型是否已缓存」
+    本身又需要 import huggingface_hub，会把这个顺序彻底搞乱——所以这里采用
+    「由配置显式决定」的方式，不依赖缓存探测。
+
+    不设为离线的后果（实测）：加载模型时会额外联网探测
+    ``adapter_config.json`` / ``processor_config.json`` 等可选文件
+    （普通非 LoRA 模型并不需要），网络不通时触发 5 次超时重试，
+    把首次加载从约 1 秒拖到 14 秒，极端情况下直接把整个请求挂死。
+
+    Args:
+        model_name: 模型标识（仓库 ID 或本地目录）。
+        force_offline: 配置开关 ``AI_CS_HF_OFFLINE``。
+
+    Returns:
+        是否启用离线模式。
+    """
+    if _is_local_dir(model_name):
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        return True
+
+    if force_offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        return True
+
+    # 允许联网：清掉可能由外部传入的离线开关，确保首次能下载
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    return False
+
+
+# 模块导入即执行：此刻尚未导入任何 HF 相关库，设置才真正有效
+_OFFLINE_MODE = _configure_offline_mode(
+    default_settings.embedding_model, default_settings.hf_offline
+)
 
 
 class BGEEmbeddings(Embeddings):
@@ -63,10 +145,33 @@ class BGEEmbeddings(Embeddings):
             if self._model is not None:
                 return self._model
 
+            # 若本次加载的模型与模块导入时判定的那个不同（例如运行时改了配置），
+            # 再兜底判定一次。注意：此时 HF 库可能已导入，设置环境变量未必生效，
+            # 因此正常路径依赖模块顶部的 _configure_offline_mode。
+            if not _OFFLINE_MODE and (
+                _is_local_dir(self.model_name) or _is_model_cached(self.model_name)
+            ):
+                logger.warning(
+                    "模型 %s 已缓存，但离线模式未在导入期启用；"
+                    "若加载卡顿/超时，请设置 HF_HUB_OFFLINE=1 后重启服务。",
+                    self.model_name,
+                )
+
             from sentence_transformers import SentenceTransformer
 
-            logger.info("正在加载向量模型 %s (device=%s)…", self.model_name, self._device)
-            model = SentenceTransformer(self.model_name, device=self._device)
+            model_ref = (
+                str(Path(self.model_name).resolve())
+                if _is_local_dir(self.model_name)
+                else self.model_name
+            )
+
+            logger.info(
+                "正在加载向量模型 %s (device=%s, offline=%s)…",
+                model_ref,
+                self._device,
+                _OFFLINE_MODE,
+            )
+            model = SentenceTransformer(model_ref, device=self._device)
             self._model = model
             dim = model.get_embedding_dimension()
             logger.info("向量模型加载完成，维度=%s", dim)

@@ -80,42 +80,69 @@ def test_vector_store() -> None:
 
 
 def test_hybrid_retrieval() -> None:
-    """混合检索能召回正确的政策片段。"""
+    """混合检索能召回与问题相关的政策片段。
+
+    断言只校验「召回内容确实与问题主题相关」，**不绑定具体文件名**：
+    政策文档会持续增删（例如 FAQ 也能正确回答退货运费），
+    绑定文件名的断言会随语料演进而误报。
+    """
     from app.rag.hybrid_retriever import get_hybrid_retriever_cached
 
     retriever = get_hybrid_retriever_cached()
     retrieved = retriever.reload()
     check("混合检索：BM25+向量均就绪", retrieved, f"corpus={retriever.corpus_size}")
 
+    # (问题, 期望出现在召回片段「来源或正文」中的关键词)
     cases = [
-        ("七天无理由退货是几天", "退换货政策"),
-        ("运费多少钱", "配送与运费政策"),
-        ("发票开错了能重开吗", "发票与退款政策"),
-        ("VIP 等级怎么升级", "会员与优惠券政策"),
+        ("七天无理由退货是几天", ("七天", "无理由")),
+        ("运费多少钱", ("运费", "包邮", "配送")),
+        ("发票开错了能重开吗", ("发票", "重开", "开具")),
+        ("VIP 等级怎么升级", ("会员", "等级", "成长值")),
     ]
-    for question, expected_source in cases:
+    for question, keywords in cases:
         scored = retriever.retrieve_with_scores(question)
-        sources = [doc.metadata.get("source", "") for doc, _ in scored]
-        hit = any(expected_source in source for source in sources)
         top = scored[0][1] if scored else 0.0
+        haystack = " ".join(
+            f"{doc.metadata.get('source', '')} {doc.page_content[:300]}"
+            for doc, _ in scored[:3]
+        )
+        hit = any(keyword in haystack for keyword in keywords)
+        top_source = scored[0][0].metadata.get("source") if scored else "-"
         check(
             f"混合检索命中「{question}」",
             hit,
-            f"top_score={top:.4f} sources={sources[:3]}",
+            f"top_score={top:.4f} 关键词={keywords} 首条来源={top_source}",
         )
 
 
 def test_relevance_gate() -> None:
-    """完全无关的问题不应通过相关性门控。"""
+    """无关问题不应通过相关性门控。
+
+    对多个**性质不同**的无关问题取最高分，避免只测一个用例时
+    恰好在阈值边缘而给出虚假信心（曾出现 0.4089 贴着 0.40 阈值漏放的情况）。
+    """
     from app.rag.hybrid_retriever import get_hybrid_retriever_cached
 
     retriever = get_hybrid_retriever_cached()
-    scored = retriever.retrieve_with_scores("如何用 Python 训练一个卷积神经网络识别猫狗图片")
-    best = max((score for _, score in scored), default=0.0)
+    off_topic = [
+        "如何用 Python 训练一个卷积神经网络识别猫狗图片",
+        "证明费马大定理的简要思路",
+        "帮我写一首关于秋天的七言绝句",
+        "量子纠缠的物理原理是什么",
+    ]
+    worst = 0.0
+    worst_query = ""
+    for query in off_topic:
+        scored = retriever.retrieve_with_scores(query)
+        best = max((score for _, score in scored), default=0.0)
+        print(f"     无关问题最高分 {best:.4f} <- {query[:24]}")
+        if best > worst:
+            worst, worst_query = best, query
+
     check(
         "相关性门控：无关问题最高分低于阈值",
-        best < settings.relevance_threshold,
-        f"best={best:.4f} threshold={settings.relevance_threshold}",
+        worst < settings.relevance_threshold,
+        f"worst={worst:.4f} ({worst_query[:20]}) threshold={settings.relevance_threshold}",
     )
 
 
@@ -262,10 +289,17 @@ def test_http_api() -> None:
             check("HTTP：检索有结果", len(results) > 0, f"n={len(results)}")
             if results:
                 top = results[0]
+                # 只要求首条与「退货运费」主题相关，不绑定具体文件名
+                preview = top.get("content", "")
                 check(
-                    "HTTP：检索命中退换货/配送政策",
-                    "政策" in top.get("source", ""),
-                    f"{top.get('source')} score={top.get('score')}",
+                    "HTTP：检索内容与问题主题相关",
+                    any(word in preview for word in ("运费", "退货", "包邮", "配送")),
+                    f"{top.get('source')} score={top.get('score')} 正文={preview[:40]}",
+                )
+                check(
+                    "HTTP：返回了阈值判定标记",
+                    "passed_threshold" in top,
+                    f"passed={top.get('passed_threshold')} 阈值={data.get('threshold')}",
                 )
 
         # --- 配置接口 ---
