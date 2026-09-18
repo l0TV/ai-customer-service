@@ -29,6 +29,7 @@ from app.tools.policy_tools import get_policy_tools
 logger = get_logger(__name__)
 
 AGENT_SYSTEM_PROMPT = """你是「拾汇商城」的官方智能客服助手「小汇」，通过工具为用户提供服务。
+不要在调用工具前后输出任何「我要去查…」「让我搜索…」之类的说明文字。需要调用工具时，直接调用；最终只输出面向用户的中文回答。
 
 你有以下能力，请根据用户意图**自主判断**该用哪个：
 
@@ -102,7 +103,7 @@ def _extract_text(message: BaseMessage) -> str:
     """从消息对象提取纯文本（兼容 content 为字符串或内容块列表）。"""
     content = getattr(message, "content", "")
     if isinstance(content, str):
-        return content.strip()
+        return content
     if isinstance(content, Sequence):
         parts: list[str] = []
         for block in content:
@@ -112,8 +113,8 @@ def _extract_text(message: BaseMessage) -> str:
                 text = block.get("text")
                 if isinstance(text, str):
                     parts.append(text)
-        return "".join(parts).strip()
-    return str(content).strip()
+        return "".join(parts)
+    return str(content)
 
 
 class CustomerServiceAgent:

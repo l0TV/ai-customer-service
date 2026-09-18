@@ -387,7 +387,7 @@ def format_documents(documents: Iterable[Document], *, max_chars: int = 1400) ->
         content = doc.page_content.strip()
         if len(content) > max_chars:
             content = content[:max_chars] + "…"
-        blocks.append(f"[{index}] 来源：{source}｜章节：{section}\n{content}")
+        blocks.append(f"来源：{source}｜章节：{section}\n{content}")
     return "\n\n".join(blocks)
 
 

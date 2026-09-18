@@ -53,7 +53,7 @@ def search_platform_policy(query: str, top_k: int = 0) -> str:
         top_k: 返回片段数，0 表示默认。
 
     Returns:
-        带编号与来源的原文片段文本；无结果时返回明确的空结果提示。
+        原文片段文本；无结果时返回明确的空结果提示。
     """
     query = (query or "").strip()
     if not query:
@@ -86,10 +86,9 @@ def search_platform_policy(query: str, top_k: int = 0) -> str:
     logger.info("政策检索命中 %d/%d 个片段: %s", len(relevant), len(scored), query[:80])
     return (
         f"【检索结果】以下 {len(relevant)} 个片段来自平台政策知识库，"
-        "是你的唯一作答依据（编号用于引用）：\n\n"
+        "是你的唯一作答依据：\n\n"
         f"{context}\n\n"
-        "【作答要求】仅依据上述片段回答；片段不足以回答时必须明确拒答并建议联系人工客服；"
-        "涉及事实处用 [编号] 标注来源；不得编造条款、时限或金额。"
+        "【作答要求】仅依据上述片段回答；片段不足以回答时必须明确拒答并建议联系人工客服"
     )
 
 
